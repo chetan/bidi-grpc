@@ -3,7 +3,6 @@ package bidigrpc
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"time"
 
@@ -15,10 +14,7 @@ import (
 // Connect to the server and establish a yamux channel for bidi grpc
 func Connect(addr string, grpcServer *grpc.Server) *grpc.ClientConn {
 	yDialer := NewYamuxDialer()
-	gconn, err := grpc.Dial(addr, grpc.WithInsecure(), grpc.WithDialer(yDialer.Dial))
-	if err != nil {
-		log.Fatalf("did not connect: %v", err)
-	}
+	gconn, _ := grpc.Dial(addr, grpc.WithInsecure(), grpc.WithDialer(yDialer.Dial))
 
 	go func() {
 		// start connect loop to maintain server connection over the yamux channel
@@ -37,18 +33,17 @@ func Connect(addr string, grpcServer *grpc.Server) *grpc.ClientConn {
 // multiplexing both grpc client and server on the same underlying tcp socket
 //
 // this is separate from the run-loop for easy resource cleanup via defer
-func connect(addr string, grpcServer *grpc.Server, yDialer *YamuxDialer) {
+func connect(addr string, grpcServer *grpc.Server, yDialer *YamuxDialer) error {
 	// dial underlying tcp connection
 	conn, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", addr)
 	if err != nil {
-		log.Printf("Failed to connect %s", err)
-		return
+		return err
 	}
 	defer conn.Close()
 
 	session, err := yamux.Client(conn, nil)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	defer session.Close()
 
@@ -63,25 +58,25 @@ func connect(addr string, grpcServer *grpc.Server, yDialer *YamuxDialer) {
 
 	// return when the conn closes so we can try reconnecting
 	<-session.CloseChan()
+	return nil
 }
 
 // Listen starts the server side of the yamux channel for bidi grpc.
 //
 // Standard unidirectional grpc without yamux is still accepted as normal for
 // clients which don't support or need bidi communication.
-func Listen(addr string, grpcServer *grpc.Server) *grpc.ClientConn {
+func Listen(addr string, grpcServer *grpc.Server) (*grpc.ClientConn, chan int, error) {
 	// create client
 	yDialer := NewYamuxDialer()
 	gconn, err := grpc.Dial("localhost:50000", grpc.WithInsecure(), grpc.WithDialer(yDialer.Dial))
 	if err != nil {
-		fmt.Println("failed to create grpc client: ", err)
-		return nil
+		return nil, nil, fmt.Errorf("failed to create grpc client: %s", err)
 	}
 
 	// create underlying tcp listener
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		return nil, nil, fmt.Errorf("failed to open listener: %s", err)
 	}
 
 	// use cmux to look for plain http2 clients
@@ -96,9 +91,13 @@ func Listen(addr string, grpcServer *grpc.Server) *grpc.ClientConn {
 	go grpcServer.Serve(tlsL)
 	go listenLoop(yamuxL, grpcServer, yDialer)
 
-	go mux.Serve()
+	shutdownChan := make(chan int)
+	go func() {
+		mux.Serve()
+		close(shutdownChan)
+	}()
 
-	return gconn
+	return gconn, shutdownChan, nil
 }
 
 func listenLoop(lis net.Listener, grpcServer *grpc.Server, dialer *YamuxDialer) {
@@ -106,13 +105,13 @@ func listenLoop(lis net.Listener, grpcServer *grpc.Server, dialer *YamuxDialer) 
 		// accept a new connection and set up a yamux session on it
 		conn, err := lis.Accept()
 		if err != nil {
-			panic(err)
+			return // chan is prob shut down
 		}
 
 		// server session will be used to multiplex both clients & servers
 		session, err := yamux.Server(conn, nil)
 		if err != nil {
-			panic(err)
+			return // chan is prob shut down
 		}
 
 		// start grpc server using yamux session (which implements net.Listener)
@@ -121,5 +120,4 @@ func listenLoop(lis net.Listener, grpcServer *grpc.Server, dialer *YamuxDialer) 
 		// pass session to grpc client
 		dialer.SetSession(session)
 	}
-
 }
