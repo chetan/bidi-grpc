@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/yamux"
 	"github.com/soheilhy/cmux"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 )
 
 // Connect to the server and establish a yamux channel for bidi grpc
@@ -117,11 +118,28 @@ func listenLoop(lis net.Listener, grpcServer *grpc.Server, clientChan chan *grpc
 		dialer := NewYamuxDialer()
 		dialer.SetSession(session)
 		gconn, _ := grpc.Dial("localhost:50000", grpc.WithInsecure(), grpc.WithDialer(dialer.Dial))
+
 		go func() {
 			// wait for session close and close related gconn
 			<-session.CloseChan()
 			gconn.Close()
 		}()
+
+		go func() {
+			// close session if gconn is closed for any reason
+			state := gconn.GetState()
+			for {
+				switch state {
+				case connectivity.Shutdown:
+					gconn.Close()
+					session.Close()
+					return
+				}
+				gconn.WaitForStateChange(context.Background(), gconn.GetState())
+				state = gconn.GetState()
+			}
+		}()
+
 		clientChan <- gconn // publish gconn
 	}
 }
