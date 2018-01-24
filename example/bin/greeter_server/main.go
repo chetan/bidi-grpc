@@ -21,7 +21,10 @@
 package main
 
 import (
+	"fmt"
 	"time"
+
+	"google.golang.org/grpc/connectivity"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
@@ -41,25 +44,32 @@ func main() {
 	helloworld.RegisterGreeterServer(grpcServer, helloworld.NewServerImpl())
 	reflection.Register(grpcServer)
 
-	gconn, shutdownChan, err := bidigrpc.Listen(port, grpcServer)
+	clientChan, shutdownChan, err := bidigrpc.Listen(port, grpcServer)
 	if err != nil {
 		panic(err)
 	}
-	defer gconn.Close()
-	grpcClient := helloworld.NewGreeterClient(gconn)
 
-	// start client conn back to agent
-	for {
-		helloworld.Greet(grpcClient, "client", "bob")
-		time.Sleep(helloworld.Timeout)
+	clientNum := 0
+	go func() {
+		for {
+			// accept new client conn and start working with it
+			gconn := <-clientChan
+			grpcClient := helloworld.NewGreeterClient(gconn)
 
-		select {
-		case <-shutdownChan:
-			// whether we got a val, or not ok, means we are done here
-			break
-		default:
-			// continue
+			go func() {
+				clientNum++
+				bobNum := clientNum
+				for {
+					if gconn.GetState() == connectivity.Shutdown {
+						fmt.Println("client shutdown, exiting loop")
+						break
+					}
+					helloworld.Greet(grpcClient, "client", fmt.Sprintf("bob%d", bobNum))
+					time.Sleep(helloworld.Timeout)
+				}
+			}()
 		}
-	}
+	}()
 
+	<-shutdownChan
 }

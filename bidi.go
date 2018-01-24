@@ -65,14 +65,7 @@ func connect(addr string, grpcServer *grpc.Server, yDialer *YamuxDialer) error {
 //
 // Standard unidirectional grpc without yamux is still accepted as normal for
 // clients which don't support or need bidi communication.
-func Listen(addr string, grpcServer *grpc.Server) (*grpc.ClientConn, chan int, error) {
-	// create client
-	yDialer := NewYamuxDialer()
-	gconn, err := grpc.Dial("localhost:50000", grpc.WithInsecure(), grpc.WithDialer(yDialer.Dial))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create grpc client: %s", err)
-	}
-
+func Listen(addr string, grpcServer *grpc.Server) (chan *grpc.ClientConn, chan int, error) {
 	// create underlying tcp listener
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -86,21 +79,24 @@ func Listen(addr string, grpcServer *grpc.Server) (*grpc.ClientConn, chan int, e
 	grpcL := mux.Match(cmux.HTTP2HeaderField("content-type", "application/grpc"))
 	yamuxL := mux.Match(cmux.Any())
 
+	clientChan := make(chan *grpc.ClientConn)
+
 	// start servers for both plain-grpc and yamux bidi grpc
 	go grpcServer.Serve(grpcL)
 	go grpcServer.Serve(tlsL)
-	go listenLoop(yamuxL, grpcServer, yDialer)
+	go listenLoop(yamuxL, grpcServer, clientChan)
 
 	shutdownChan := make(chan int)
 	go func() {
-		mux.Serve()
+		mux.Serve() // serve forever
 		close(shutdownChan)
 	}()
 
-	return gconn, shutdownChan, nil
+	return clientChan, shutdownChan, nil
 }
 
-func listenLoop(lis net.Listener, grpcServer *grpc.Server, dialer *YamuxDialer) {
+// listenLoop accepts new connections and sets up a yamux channel and grpc client on it.
+func listenLoop(lis net.Listener, grpcServer *grpc.Server, clientChan chan *grpc.ClientConn) {
 	for {
 		// accept a new connection and set up a yamux session on it
 		conn, err := lis.Accept()
@@ -117,7 +113,15 @@ func listenLoop(lis net.Listener, grpcServer *grpc.Server, dialer *YamuxDialer) 
 		// start grpc server using yamux session (which implements net.Listener)
 		go grpcServer.Serve(session)
 
-		// pass session to grpc client
+		// create new client connection and dialer for this session
+		dialer := NewYamuxDialer()
 		dialer.SetSession(session)
+		gconn, _ := grpc.Dial("localhost:50000", grpc.WithInsecure(), grpc.WithDialer(dialer.Dial))
+		go func() {
+			// wait for session close and close related gconn
+			<-session.CloseChan()
+			gconn.Close()
+		}()
+		clientChan <- gconn // publish gconn
 	}
 }
