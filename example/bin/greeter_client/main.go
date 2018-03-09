@@ -20,6 +20,8 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -36,24 +38,50 @@ const (
 	defaultName = "world"
 )
 
-func main() {
-	// args
-	name := defaultName
-	if len(os.Args) > 1 {
-		if os.Args[1] == "--plain" {
-			doPlainClient(address, name)
-			return
-		}
-		name = os.Args[1]
+var (
+	help      bool
+	plainGRPC bool
+	useTLS    bool
+	name      string
+)
+
+func flags() {
+	flag.BoolVar(&help, "help", false, "Get help")
+	flag.BoolVar(&help, "h", false, "")
+
+	flag.StringVar(&name, "name", defaultName, "Name to greet with")
+	flag.BoolVar(&plainGRPC, "plain", false, "Plain GRPC client (no bidi comms)")
+	flag.BoolVar(&useTLS, "tls", false, "Use TLS (works with plain and bidi)")
+
+	flag.Parse()
+
+	if help {
+		fmt.Println("greeter_client")
+		fmt.Println()
+		flag.PrintDefaults()
+		os.Exit(1)
 	}
 
+}
+
+func main() {
+	flags()
+	if plainGRPC {
+		doPlainClient(address, name)
+	} else {
+		doBidiClient(address, name)
+	}
+}
+
+func doBidiClient(addr string, name string) {
 	// create reusable grpc server
 	grpcServer := grpc.NewServer()
 	helloworld.RegisterGreeterServer(grpcServer, helloworld.NewServerImpl())
 	reflection.Register(grpcServer)
 
 	// open channel and create client
-	gconn := bidigrpc.Connect(context.Background(), address, grpcServer)
+	dialOpts := &bidigrpc.DialOpts{Addr: addr}
+	gconn := bidigrpc.Connect(context.Background(), dialOpts, grpcServer)
 	defer gconn.Close()
 	grpcClient := helloworld.NewGreeterClient(gconn)
 
