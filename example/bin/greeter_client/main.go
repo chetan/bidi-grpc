@@ -19,6 +19,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"time"
@@ -52,7 +53,7 @@ func main() {
 	reflection.Register(grpcServer)
 
 	// open channel and create client
-	gconn := bidigrpc.Connect(address, grpcServer)
+	gconn := bidigrpc.Connect(context.Background(), address, grpcServer)
 	defer gconn.Close()
 	grpcClient := helloworld.NewGreeterClient(gconn)
 

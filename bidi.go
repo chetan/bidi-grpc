@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cenkalti/backoff"
 	"github.com/hashicorp/yamux"
 	"github.com/soheilhy/cmux"
 	"google.golang.org/grpc"
@@ -14,19 +15,29 @@ import (
 )
 
 // Connect to the server and establish a yamux channel for bidi grpc
-func Connect(addr string, grpcServer *grpc.Server) *grpc.ClientConn {
+func Connect(ctx context.Context, addr string, grpcServer *grpc.Server) *grpc.ClientConn {
 	yDialer := NewYamuxDialer()
-	gconn, _ := grpc.Dial(addr, grpc.WithInsecure(), grpc.WithDialer(yDialer.Dial))
 
 	go func() {
 		// start connect loop to maintain server connection over the yamux channel
-		for {
-			connect(addr, grpcServer, yDialer)
-			time.Sleep(1 * time.Second)
+		connectOp := func() error {
+			return connect(addr, grpcServer, yDialer)
 		}
+		retry(ctx, connectOp, 5*time.Second, 0)
 	}()
 
+	gconn, _ := grpc.Dial(addr, grpc.WithInsecure(), grpc.WithDialer(yDialer.Dial))
 	return gconn
+}
+
+func retry(ctx context.Context, op backoff.Operation, maxInterval time.Duration, maxElapsedTime time.Duration) error {
+	eb := backoff.NewExponentialBackOff()
+	eb.MaxInterval = maxInterval
+	eb.MaxElapsedTime = maxElapsedTime
+	if ctx == nil {
+		return backoff.Retry(op, eb)
+	}
+	return backoff.Retry(op, backoff.WithContext(eb, ctx))
 }
 
 // connect to server
