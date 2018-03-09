@@ -22,7 +22,7 @@ type DialOpts struct {
 	TLSConfig *tls.Config
 }
 
-// Connect to the server and establish a yamux channel for bidi grpc
+// Connect to the server and establish a yamux channel for bidi grpc.
 func Connect(ctx context.Context, dialOpts *DialOpts, grpcServer *grpc.Server) *grpc.ClientConn {
 	yDialer := NewYamuxDialer()
 
@@ -31,7 +31,18 @@ func Connect(ctx context.Context, dialOpts *DialOpts, grpcServer *grpc.Server) *
 		connectOp := func() error {
 			return connect(dialOpts, grpcServer, yDialer)
 		}
-		retry(ctx, connectOp, 5*time.Second, 0)
+		for {
+			// retry will keep trying to connect to the server forever (or until context is done/canceled)
+			// after a successful connection, however, retry will return nil when the connection is closed
+			// so wrap in a loop here to reconnect and try again so we can maintain the connection
+			retry(ctx, connectOp, 5*time.Second, 0)
+			// check if we should give up due to canceled ctx
+			select {
+			case <-ctx.Done():
+			default:
+				fmt.Println("ctx not done yet, trying again")
+			}
+		}
 	}()
 
 	gconn, _ := grpc.Dial(dialOpts.Addr, grpc.WithInsecure(), grpc.WithDialer(yDialer.Dial))
