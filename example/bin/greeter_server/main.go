@@ -22,6 +22,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"time"
 
 	"google.golang.org/grpc/connectivity"
@@ -44,7 +45,12 @@ func main() {
 	helloworld.RegisterGreeterServer(grpcServer, helloworld.NewServerImpl())
 	reflection.Register(grpcServer)
 
-	clientChan, shutdownChan, err := bidigrpc.Listen(port, grpcServer)
+	lis, err := net.Listen("tcp", port)
+	if err != nil {
+		panic(err)
+	}
+
+	clientChan, shutdownChan, err := bidigrpc.Listen(lis, grpcServer, nil)
 	if err != nil {
 		panic(err)
 	}

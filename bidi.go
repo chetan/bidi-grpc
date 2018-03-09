@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -66,28 +67,35 @@ func connect(addr string, grpcServer *grpc.Server, yDialer *YamuxDialer) error {
 //
 // Standard unidirectional grpc without yamux is still accepted as normal for
 // clients which don't support or need bidi communication.
-func Listen(addr string, grpcServer *grpc.Server) (chan *grpc.ClientConn, chan int, error) {
-	// create underlying tcp listener
-	lis, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open listener: %s", err)
+func Listen(lis net.Listener, grpcServer *grpc.Server, httpServer *http.Server) (clientChan chan *grpc.ClientConn, shutdownChan chan int, err error) {
+	// use cmux to look for plain http2 grpc clients
+	// this allows us to support non-yamux enabled clients (such as non-golang impls)
+	// we can also optionally handle plain-http2 (non-grpc) and http1 clients
+	mux := cmux.New(lis)
+	grpcL := mux.Match(cmux.HTTP2HeaderField("content-type", "application/grpc")) // gRPC listener
+	http2L := mux.Match(cmux.HTTP2())                                             // HTTP 2.x listener (all non-grpc)
+	http1L := mux.Match(cmux.HTTP1Fast())                                         // HTTP 1.x listener
+	yamuxL := mux.Match(YamuxMatcher)                                             // yamux listener
+
+	// handle non-grpc http1/2 clients
+	if httpServer == nil {
+		// no handler, just dispose connections
+		go closeLoop(http1L)
+		go closeLoop(http2L)
+	} else {
+		// start server
+		go httpServer.Serve(http1L)
+		go httpServer.Serve(http2L)
 	}
 
-	// use cmux to look for plain http2 clients
-	// this allows us to support non-yamux enabled clients (such as non-golang impls)
-	mux := cmux.New(lis)
-	tlsL := mux.Match(cmux.TLS())
-	grpcL := mux.Match(cmux.HTTP2HeaderField("content-type", "application/grpc"))
-	yamuxL := mux.Match(cmux.Any())
-
-	clientChan := make(chan *grpc.ClientConn)
+	// create channels
+	clientChan = make(chan *grpc.ClientConn)
+	shutdownChan = make(chan int)
 
 	// start servers for both plain-grpc and yamux bidi grpc
 	go grpcServer.Serve(grpcL)
-	go grpcServer.Serve(tlsL)
 	go listenLoop(yamuxL, grpcServer, clientChan)
 
-	shutdownChan := make(chan int)
 	go func() {
 		mux.Serve() // serve forever
 		close(shutdownChan)
@@ -141,5 +149,17 @@ func listenLoop(lis net.Listener, grpcServer *grpc.Server, clientChan chan *grpc
 		}()
 
 		clientChan <- gconn // publish gconn
+	}
+}
+
+// closeLoop accepts connections from the given listener and immediately closes them.
+func closeLoop(lis net.Listener) {
+	for {
+		conn, err := lis.Accept()
+		if err != nil {
+			return // chan is prob shut down
+		}
+		fmt.Println("closing plain http conn")
+		conn.Close() // ignore err while closing (?)
 	}
 }
