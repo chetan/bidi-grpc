@@ -2,6 +2,7 @@ package bidigrpc
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,22 +15,30 @@ import (
 	"google.golang.org/grpc/connectivity"
 )
 
+// DialOpts configures the Dialer for the underlying TCP connection
+type DialOpts struct {
+	Addr      string
+	TLS       bool // whether or not to use TLS for the underlying channel
+	TLSConfig *tls.Config
+}
+
 // Connect to the server and establish a yamux channel for bidi grpc
-func Connect(ctx context.Context, addr string, grpcServer *grpc.Server) *grpc.ClientConn {
+func Connect(ctx context.Context, dialOpts *DialOpts, grpcServer *grpc.Server) *grpc.ClientConn {
 	yDialer := NewYamuxDialer()
 
 	go func() {
 		// start connect loop to maintain server connection over the yamux channel
 		connectOp := func() error {
-			return connect(addr, grpcServer, yDialer)
+			return connect(dialOpts, grpcServer, yDialer)
 		}
 		retry(ctx, connectOp, 5*time.Second, 0)
 	}()
 
-	gconn, _ := grpc.Dial(addr, grpc.WithInsecure(), grpc.WithDialer(yDialer.Dial))
+	gconn, _ := grpc.Dial(dialOpts.Addr, grpc.WithInsecure(), grpc.WithDialer(yDialer.Dial))
 	return gconn
 }
 
+// retry the given operation
 func retry(ctx context.Context, op backoff.Operation, maxInterval time.Duration, maxElapsedTime time.Duration) error {
 	eb := backoff.NewExponentialBackOff()
 	eb.MaxInterval = maxInterval
@@ -46,9 +55,22 @@ func retry(ctx context.Context, op backoff.Operation, maxInterval time.Duration,
 // multiplexing both grpc client and server on the same underlying tcp socket
 //
 // this is separate from the run-loop for easy resource cleanup via defer
-func connect(addr string, grpcServer *grpc.Server, yDialer *YamuxDialer) error {
+func connect(dialOpts *DialOpts, grpcServer *grpc.Server, yDialer *YamuxDialer) error {
 	// dial underlying tcp connection
-	conn, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", addr)
+	var conn net.Conn
+	var err error
+
+	if dialOpts.TLS {
+		// use tls
+		cfg := dialOpts.TLSConfig
+		if cfg == nil {
+			cfg = &tls.Config{}
+		}
+		conn, err = tls.Dial("tcp", dialOpts.Addr, cfg)
+
+	} else {
+		conn, err = (&net.Dialer{}).DialContext(context.Background(), "tcp", dialOpts.Addr)
+	}
 	if err != nil {
 		return err
 	}
