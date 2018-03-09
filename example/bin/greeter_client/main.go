@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log"
@@ -61,7 +62,6 @@ func flags() {
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
-
 }
 
 func main() {
@@ -69,18 +69,18 @@ func main() {
 	if plainGRPC {
 		doPlainClient(address, name)
 	} else {
-		doBidiClient(address, name)
+		doBidiClient(address, useTLS, name)
 	}
 }
 
-func doBidiClient(addr string, name string) {
+func doBidiClient(addr string, useTLS bool, name string) {
 	// create reusable grpc server
 	grpcServer := grpc.NewServer()
 	helloworld.RegisterGreeterServer(grpcServer, helloworld.NewServerImpl())
 	reflection.Register(grpcServer)
 
 	// open channel and create client
-	dialOpts := &bidigrpc.DialOpts{Addr: addr}
+	dialOpts := &bidigrpc.DialOpts{Addr: addr, TLS: useTLS, TLSConfig: &tls.Config{InsecureSkipVerify: true}}
 	gconn := bidigrpc.Connect(context.Background(), dialOpts, grpcServer)
 	defer gconn.Close()
 	grpcClient := helloworld.NewGreeterClient(gconn)
