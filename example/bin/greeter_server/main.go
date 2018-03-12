@@ -24,7 +24,9 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"time"
 
@@ -35,6 +37,7 @@ import (
 
 	bidigrpc "github.com/chetan/bidi-grpc"
 	"github.com/chetan/bidi-grpc/example/helloworld"
+	"github.com/soheilhy/cmux"
 )
 
 const (
@@ -47,6 +50,15 @@ var (
 	useTLS bool
 	name   string
 )
+
+type okHandler struct {
+}
+
+func (h *okHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	io.WriteString(w, "ok\n")
+}
 
 func flags() {
 	flag.BoolVar(&help, "help", false, "Get help")
@@ -76,6 +88,7 @@ func main() {
 	var lis net.Listener
 	var err error
 
+	// create base listener
 	if useTLS {
 		fmt.Println("starting greeter_server on port", port, "with TLS")
 		cer, err := tls.LoadX509KeyPair("server.crt", "server.key")
@@ -92,11 +105,41 @@ func main() {
 		}
 	}
 
-	clientChan, shutdownChan, err := bidigrpc.Listen(lis, grpcServer, nil)
+	// use cmux to look for plain http2 grpc clients
+	// this allows us to support non-yamux enabled clients (such as non-golang impls)
+	// we can also optionally handle plain-http2 (non-grpc) and http1 clients
+	mux := cmux.New(lis)
+	yamuxL := mux.Match(bidigrpc.YamuxMatcher)                                    // yamux listener
+	grpcL := mux.Match(cmux.HTTP2HeaderField("content-type", "application/grpc")) // gRPC listener
+	http2L := mux.Match(cmux.HTTP2())                                             // HTTP 2.x listener (all non-grpc)
+	http1L := mux.Match(cmux.HTTP1Fast())                                         // HTTP 1.x listener
+	anyL := mux.Match(cmux.Any())
+
+	// handle non-grpc http1/2 clients
+	httpHandler := &okHandler{}
+	go http.Serve(http1L, httpHandler)
+	go http.Serve(http2L, httpHandler)
+
+	// serve plain grpc clients
+	go grpcServer.Serve(grpcL)
+
+	// close others
+	go closeLoop(anyL)
+
+	// start bidi-grpc client/server
+	clientChan, shutdownChan, err := bidigrpc.Listen(yamuxL, grpcServer)
 	if err != nil {
 		panic(err)
 	}
 
+	go func() {
+		err := mux.Serve()
+		if err != nil {
+			fmt.Println("bye", err)
+		}
+	}()
+
+	// start client loop
 	clientNum := 0
 	go func() {
 		for {
@@ -120,4 +163,16 @@ func main() {
 	}()
 
 	<-shutdownChan
+}
+
+// closeLoop accepts connections from the given listener and immediately closes them.
+func closeLoop(lis net.Listener) {
+	for {
+		conn, err := lis.Accept()
+		if err != nil {
+			return // chan is prob shut down
+		}
+		fmt.Println("closing unknown conn")
+		conn.Close()
+	}
 }

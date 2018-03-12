@@ -103,11 +103,7 @@ func doPlainClient(addr string, name string) {
 
 	grpcClient := helloworld.NewGreeterClient(gconn)
 	for {
-		err := helloworld.Greet(grpcClient, "server", name)
-		if err != nil {
-			log.Printf("greet err: %s", err)
-			break
-		}
+		helloworld.Greet(grpcClient, "server", name)
 		time.Sleep(helloworld.Timeout)
 	}
 }

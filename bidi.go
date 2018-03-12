@@ -5,12 +5,10 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
-	"net/http"
 	"time"
 
 	"github.com/cenkalti/backoff"
 	"github.com/hashicorp/yamux"
-	"github.com/soheilhy/cmux"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 )
@@ -108,40 +106,14 @@ func connect(dialOpts *DialOpts, grpcServer *grpc.Server, yDialer *YamuxDialer) 
 }
 
 // Listen starts the server side of the yamux channel for bidi grpc.
-//
-// Standard unidirectional grpc without yamux is still accepted as normal for
-// clients which don't support or need bidi communication.
-func Listen(lis net.Listener, grpcServer *grpc.Server, httpServer *http.Server) (clientChan chan *grpc.ClientConn, shutdownChan chan int, err error) {
-	// use cmux to look for plain http2 grpc clients
-	// this allows us to support non-yamux enabled clients (such as non-golang impls)
-	// we can also optionally handle plain-http2 (non-grpc) and http1 clients
-	mux := cmux.New(lis)
-	grpcL := mux.Match(cmux.HTTP2HeaderField("content-type", "application/grpc")) // gRPC listener
-	http2L := mux.Match(cmux.HTTP2())                                             // HTTP 2.x listener (all non-grpc)
-	http1L := mux.Match(cmux.HTTP1Fast())                                         // HTTP 1.x listener
-	yamuxL := mux.Match(YamuxMatcher)                                             // yamux listener
-
-	// handle non-grpc http1/2 clients
-	if httpServer == nil {
-		// no handler, just dispose connections
-		go closeLoop(http1L)
-		go closeLoop(http2L)
-	} else {
-		// start server
-		go httpServer.Serve(http1L)
-		go httpServer.Serve(http2L)
-	}
-
+func Listen(lis net.Listener, grpcServer *grpc.Server) (clientChan chan *grpc.ClientConn, shutdownChan chan int, err error) {
 	// create channels
 	clientChan = make(chan *grpc.ClientConn)
 	shutdownChan = make(chan int)
 
-	// start servers for both plain-grpc and yamux bidi grpc
-	go grpcServer.Serve(grpcL)
-	go listenLoop(yamuxL, grpcServer, clientChan)
-
 	go func() {
-		mux.Serve() // serve forever
+		// start listenLoop - blocks until some error occurs
+		listenLoop(lis, grpcServer, clientChan)
 		close(shutdownChan)
 	}()
 
@@ -160,7 +132,8 @@ func listenLoop(lis net.Listener, grpcServer *grpc.Server, clientChan chan *grpc
 		// server session will be used to multiplex both clients & servers
 		session, err := yamux.Server(conn, nil)
 		if err != nil {
-			return // chan is prob shut down
+			conn.Close() // close conn and retry
+			continue
 		}
 
 		// start grpc server using yamux session (which implements net.Listener)
@@ -193,17 +166,5 @@ func listenLoop(lis net.Listener, grpcServer *grpc.Server, clientChan chan *grpc
 		}()
 
 		clientChan <- gconn // publish gconn
-	}
-}
-
-// closeLoop accepts connections from the given listener and immediately closes them.
-func closeLoop(lis net.Listener) {
-	for {
-		conn, err := lis.Accept()
-		if err != nil {
-			return // chan is prob shut down
-		}
-		fmt.Println("closing plain http conn")
-		conn.Close() // ignore err while closing (?)
 	}
 }
